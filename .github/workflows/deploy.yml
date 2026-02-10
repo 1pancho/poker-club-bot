@@ -14,6 +14,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Build Mini App
+        run: |
+          cd webapp
+          npm install
+          npm run build
+
       - name: Deploy to server via SSH
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -24,16 +35,30 @@ jobs:
           script: |
             set -e
 
-            # Устанавливаем необходимые пакеты если их нет
+            # Install required packages
             if ! command -v git &> /dev/null; then
-                apt-get update && apt-get install -y git python3 python3-pip python3-venv
+                apt-get update && apt-get install -y git python3 python3-pip python3-venv curl
             fi
 
-            # Создаем директорию если её нет
+            # Install Node.js via nvm if not present
+            if ! command -v node &> /dev/null; then
+                curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+                export NVM_DIR="$HOME/.nvm"
+                [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+                nvm install 20
+                nvm use 20
+            fi
+
+            # Install PM2 globally if not present
+            if ! command -v pm2 &> /dev/null; then
+                npm install -g pm2
+            fi
+
+            # Setup deploy directory
             mkdir -p ${{ secrets.DEPLOY_PATH }}
             cd ${{ secrets.DEPLOY_PATH }}
 
-            # Клонируем или обновляем репозиторий
+            # Clone or update repository
             if [ ! -d ".git" ]; then
                 git clone https://github.com/1pancho/poker-club-bot.git .
             else
@@ -41,23 +66,28 @@ jobs:
                 git reset --hard origin/main
             fi
 
-            # Создаем venv если его нет
+            # ============================================
+            # DEPLOY TELEGRAM BOT (Python)
+            # ============================================
+
+            # Create venv if not exists
             if [ ! -d "venv" ]; then
                 python3 -m venv venv
             fi
 
-            # Активируем venv и устанавливаем зависимости
+            # Install Python dependencies
             source venv/bin/activate
             pip install --upgrade pip
             pip install -r requirements.txt
 
-            # Создаем .env файл
+            # Create .env file
             cat > .env << EOF
             BOT_TOKEN=${{ secrets.BOT_TOKEN }}
+            WEBAPP_URL=${{ secrets.WEBAPP_URL }}
             DATABASE_URL=poker_club.db
             EOF
 
-            # Создаем systemd service если его нет
+            # Create systemd service for bot
             if [ ! -f "/etc/systemd/system/poker-bot.service" ]; then
                 cat > /etc/systemd/system/poker-bot.service << EOF
             [Unit]
@@ -80,9 +110,144 @@ jobs:
                 systemctl enable poker-bot
             fi
 
-            # Перезапускаем бота
+            # Restart bot
             systemctl restart poker-bot
 
-            # Проверяем статус
-            sleep 2
-            systemctl is-active poker-bot && echo "✅ Bot deployed successfully!" || echo "❌ Bot failed to start"
+            # ============================================
+            # DEPLOY WEBSOCKET SERVER (Node.js)
+            # ============================================
+
+            # Setup NVM for current session
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            nvm use 20
+
+            # Install server dependencies
+            cd server
+            npm install --production
+
+            # Stop existing PM2 process if running
+            pm2 stop poker-ws || true
+            pm2 delete poker-ws || true
+
+            # Start WebSocket server with PM2
+            PORT=3001 pm2 start index.js --name poker-ws
+            pm2 save
+
+            # Setup PM2 startup
+            pm2 startup systemd -u root --hp /root || true
+
+            cd ..
+
+            # ============================================
+            # DEPLOY MINI APP (React)
+            # ============================================
+
+            # Create webapp directory for nginx
+            mkdir -p /var/www/poker-app
+
+            # Copy built files
+            if [ -d "webapp/dist" ]; then
+                cp -r webapp/dist/* /var/www/poker-app/
+            fi
+
+            # ============================================
+            # CONFIGURE NGINX (if not already configured)
+            # ============================================
+
+            if [ ! -f "/etc/nginx/sites-available/poker-app" ]; then
+                cat > /etc/nginx/sites-available/poker-app << 'NGINXEOF'
+            server {
+                listen 80;
+                server_name ${{ secrets.SERVER_HOST }};
+
+                root /var/www/poker-app;
+                index index.html;
+
+                # Mini App static files
+                location / {
+                    try_files $uri $uri/ /index.html;
+                    add_header Cache-Control "no-cache";
+                }
+
+                # WebSocket proxy
+                location /ws {
+                    proxy_pass http://localhost:3001;
+                    proxy_http_version 1.1;
+                    proxy_set_header Upgrade $http_upgrade;
+                    proxy_set_header Connection "upgrade";
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                }
+
+                # REST API proxy
+                location /api {
+                    proxy_pass http://localhost:3001;
+                    proxy_http_version 1.1;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                }
+            }
+            NGINXEOF
+
+                # Enable site
+                ln -sf /etc/nginx/sites-available/poker-app /etc/nginx/sites-enabled/
+
+                # Test and reload nginx
+                nginx -t && systemctl reload nginx || echo "Nginx config error"
+            fi
+
+            # ============================================
+            # STATUS CHECK
+            # ============================================
+
+            echo "=========================================="
+            echo "Deployment Status:"
+            echo "=========================================="
+
+            # Check bot status
+            if systemctl is-active --quiet poker-bot; then
+                echo "✅ Telegram Bot: RUNNING"
+            else
+                echo "❌ Telegram Bot: FAILED"
+            fi
+
+            # Check WebSocket server
+            if pm2 describe poker-ws &> /dev/null; then
+                echo "✅ WebSocket Server: RUNNING on port 3001"
+            else
+                echo "❌ WebSocket Server: FAILED"
+            fi
+
+            # Check if Mini App files exist
+            if [ -f "/var/www/poker-app/index.html" ]; then
+                echo "✅ Mini App: DEPLOYED"
+            else
+                echo "❌ Mini App: FAILED"
+            fi
+
+            # Check nginx
+            if systemctl is-active --quiet nginx; then
+                echo "✅ Nginx: RUNNING"
+            else
+                echo "❌ Nginx: NOT RUNNING"
+            fi
+
+            echo "=========================================="
+            echo "Deployment complete!"
+            echo "Mini App URL: http://${{ secrets.SERVER_HOST }}/"
+            echo "WebSocket: ws://${{ secrets.SERVER_HOST }}/ws"
+            echo "=========================================="
+
+      - name: Copy built webapp to server
+        uses: appleboy/scp-action@v0.1.4
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          source: "webapp/dist/*"
+          target: "/var/www/poker-app/"
+          strip_components: 2
