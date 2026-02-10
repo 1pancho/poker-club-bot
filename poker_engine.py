@@ -26,9 +26,11 @@ class Rank(Enum):
     KING = (13, "K")
     ACE = (14, "A")
 
-    def __init__(self, value, symbol):
-        self.value = value
-        self.symbol = symbol
+    def __new__(cls, numeric_value, symbol):
+        obj = object.__new__(cls)
+        obj._value_ = numeric_value
+        obj.symbol = symbol
+        return obj
 
 
 class Card:
@@ -61,9 +63,11 @@ class HandRank(Enum):
     STRAIGHT_FLUSH = (9, "Стрит флеш")
     ROYAL_FLUSH = (10, "Роял флеш")
 
-    def __init__(self, value, name_ru):
-        self.value = value
-        self.name_ru = name_ru
+    def __new__(cls, rank_value, name_ru):
+        obj = object.__new__(cls)
+        obj._value_ = rank_value
+        obj.name_ru = name_ru
+        return obj
 
 
 class Deck:
