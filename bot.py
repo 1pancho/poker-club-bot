@@ -1,6 +1,6 @@
 import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -155,7 +155,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <i>Удачи за столами! 🍀</i>
 """
 
-    await update.message.reply_text(welcome_msg, parse_mode=ParseMode.HTML)
+    # Add button to launch Mini App
+    webapp_url = os.getenv('WEBAPP_URL', 'https://1pancho.github.io/poker-club-bot/')
+    keyboard = [
+        [InlineKeyboardButton("🎮 Играть в покер", web_app=WebAppInfo(url=webapp_url))],
+        [
+            InlineKeyboardButton("💰 Баланс", callback_data="balance"),
+            InlineKeyboardButton("🏆 Рейтинг", callback_data="leaderboard")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(welcome_msg, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
