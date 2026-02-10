@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900;
+    @apply text-white min-h-screen m-0;
+  }
+}
+
+@layer components {
+  .card {
+    @apply relative w-16 h-24 rounded-lg shadow-lg;
+    @apply flex items-center justify-center text-2xl font-bold;
+    @apply bg-white text-gray-900 border-2 border-gray-200;
+    @apply transition-all duration-300 hover:scale-105;
+  }
+
+  .card-back {
+    @apply bg-gradient-to-br from-blue-600 to-purple-600 text-white;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1 px-3 py-1.5 rounded-full;
+    @apply font-semibold text-sm shadow-md;
+  }
+
+  .poker-table {
+    @apply relative rounded-[50%] border-8 border-amber-900 shadow-2xl;
+    background: linear-gradient(135deg, #0D5F2F 0%, #0A4B25 100%);
+  }
+}
