@@ -22,11 +22,67 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SERVER_PORT || 22 }}
           script: |
+            set -e
+
+            # Устанавливаем необходимые пакеты если их нет
+            if ! command -v git &> /dev/null; then
+                apt-get update && apt-get install -y git python3 python3-pip python3-venv
+            fi
+
+            # Создаем директорию если её нет
+            mkdir -p ${{ secrets.DEPLOY_PATH }}
             cd ${{ secrets.DEPLOY_PATH }}
-            git pull origin main
+
+            # Клонируем или обновляем репозиторий
+            if [ ! -d ".git" ]; then
+                git clone https://github.com/1pancho/poker-club-bot.git .
+            else
+                git fetch origin
+                git reset --hard origin/main
+            fi
+
+            # Создаем venv если его нет
+            if [ ! -d "venv" ]; then
+                python3 -m venv venv
+            fi
+
+            # Активируем venv и устанавливаем зависимости
             source venv/bin/activate
+            pip install --upgrade pip
             pip install -r requirements.txt
-            echo "BOT_TOKEN=${{ secrets.BOT_TOKEN }}" > .env
-            echo "DATABASE_URL=poker_club.db" >> .env
-            sudo systemctl restart poker-bot
-            echo "Deployment completed successfully!"
+
+            # Создаем .env файл
+            cat > .env << EOF
+            BOT_TOKEN=${{ secrets.BOT_TOKEN }}
+            DATABASE_URL=poker_club.db
+            EOF
+
+            # Создаем systemd service если его нет
+            if [ ! -f "/etc/systemd/system/poker-bot.service" ]; then
+                cat > /etc/systemd/system/poker-bot.service << EOF
+            [Unit]
+            Description=Poker Club Telegram Bot
+            After=network.target
+
+            [Service]
+            Type=simple
+            User=root
+            WorkingDirectory=${{ secrets.DEPLOY_PATH }}
+            Environment="PATH=${{ secrets.DEPLOY_PATH }}/venv/bin"
+            ExecStart=${{ secrets.DEPLOY_PATH }}/venv/bin/python bot.py
+            Restart=always
+            RestartSec=10
+
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+                systemctl daemon-reload
+                systemctl enable poker-bot
+            fi
+
+            # Перезапускаем бота
+            systemctl restart poker-bot
+
+            # Проверяем статус
+            sleep 2
+            systemctl is-active poker-bot && echo "✅ Bot deployed successfully!" || echo "❌ Bot failed to start"
