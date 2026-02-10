@@ -26,5 +26,7 @@ jobs:
             git pull origin main
             source venv/bin/activate
             pip install -r requirements.txt
+            echo "BOT_TOKEN=${{ secrets.BOT_TOKEN }}" > .env
+            echo "DATABASE_URL=poker_club.db" >> .env
             sudo systemctl restart poker-bot
             echo "Deployment completed successfully!"
