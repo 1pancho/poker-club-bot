@@ -1,128 +1,97 @@
-import { useState } from 'react'
-import './index.css'
+import { useState, useEffect } from 'react';
+import './index.css';
+import { PokerTable } from './components/PokerTable';
+import { useWebSocket } from './hooks/useWebSocket';
+import { telegramService } from './services/telegram';
 
-// Simple Playing Card Component
-function PlayingCard({ card, small = false }: { card: string; small?: boolean }) {
-  const isHidden = card === '?'
-  const isRed = card.includes('♥') || card.includes('♦')
-
-  return (
-    <div className={`card ${isHidden ? 'card-back' : ''} ${small ? '!w-12 !h-16 !text-lg' : ''}`}>
-      {isHidden ? (
-        <div className="text-white/30">🎴</div>
-      ) : (
-        <div className={`flex flex-col items-center ${isRed ? 'text-red-500' : 'text-gray-900'}`}>
-          <span className="font-bold">{card}</span>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// Poker Table Component
-function PokerTable() {
-  const [pot] = useState(200)
-  const [communityCards] = useState(['A♥', 'K♦', 'Q♣'])
-  const [currentBet] = useState(50)
-
-  const players = [
-    { id: 1, name: 'Вы', chips: 1000, cards: ['A♠', 'K♠'], position: 'bottom-4 left-1/2 -translate-x-1/2' },
-    { id: 2, name: 'Игрок 2', chips: 850, cards: ['?', '?'], position: 'top-4 left-1/4' },
-    { id: 3, name: 'Игрок 3', chips: 1200, cards: ['?', '?'], position: 'top-4 right-1/4' },
-    { id: 4, name: 'Игрок 4', chips: 600, cards: ['?', '?'], position: 'bottom-4 right-8' },
-  ]
-
-  return (
-    <div className="w-full max-w-4xl">
-      <div className="relative w-full h-[500px] poker-table">
-        {/* Community Cards */}
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex gap-2">
-          {communityCards.map((card, i) => (
-            <PlayingCard key={i} card={card} />
-          ))}
-          <PlayingCard card="?" />
-          <PlayingCard card="?" />
-        </div>
-
-        {/* Pot */}
-        <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-8">
-          <div className="chip bg-yellow-500 text-gray-900">
-            💰 ${pot}
-          </div>
-        </div>
-
-        {/* Players */}
-        {players.map((player) => (
-          <div key={player.id} className={`absolute ${player.position}`}>
-            <div className="bg-gray-800/90 rounded-xl p-3 backdrop-blur-sm border border-gray-700 min-w-[150px]">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-semibold text-sm">{player.name}</span>
-                <span className="chip bg-blue-500 text-xs">${player.chips}</span>
-              </div>
-
-              <div className="flex gap-1 justify-center">
-                {player.cards.map((card, i) => (
-                  <div key={i} className="scale-75">
-                    <PlayingCard card={card} small />
-                  </div>
-                ))}
-              </div>
-
-              {player.id === 1 && (
-                <div className="mt-2 flex gap-1 text-xs">
-                  <button className="flex-1 bg-red-500 hover:bg-red-600 rounded py-1 font-semibold transition">
-                    Fold
-                  </button>
-                  <button className="flex-1 bg-green-500 hover:bg-green-600 rounded py-1 font-semibold transition">
-                    Call ${currentBet}
-                  </button>
-                  <button className="flex-1 bg-yellow-500 hover:bg-yellow-600 rounded py-1 font-semibold transition text-gray-900">
-                    Raise
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <div className="mt-6 flex justify-center gap-4 text-sm">
-        <div className="chip bg-purple-500">🎲 Flop</div>
-        <div className="chip bg-orange-500">💵 Bet: ${currentBet}</div>
-      </div>
-    </div>
-  )
-}
-
-// Main App
 function App() {
-  const [gameStarted, setGameStarted] = useState(false)
+  const [gameStarted, setGameStarted] = useState(false);
+  const { connected, gameState, joinGame, fold, call, raise } = useWebSocket();
+
+  useEffect(() => {
+    // Initialize Telegram WebApp
+    telegramService.init();
+  }, []);
+
+  const handleStartGame = () => {
+    const userId = telegramService.getUserId();
+    const userName = telegramService.getUserName();
+    const gameId = 'default'; // In production, this could be from a room code
+
+    joinGame(gameId, userId, userName);
+    setGameStarted(true);
+    telegramService.hapticFeedback('impact', 'medium');
+  };
+
+  const handleFold = () => {
+    fold();
+    telegramService.hapticFeedback('impact', 'light');
+  };
+
+  const handleCall = () => {
+    call();
+    telegramService.hapticFeedback('impact', 'medium');
+  };
+
+  const handleRaise = () => {
+    raise(100); // Default raise amount
+    telegramService.hapticFeedback('impact', 'heavy');
+  };
+
+  // Use real game state if connected, otherwise show mock data
+  const players = gameState?.players || [
+    { name: 'Вы', chips: 1000, cards: ['A♠', 'K♠'], bet: 50 },
+    { name: 'Игрок 2', chips: 850, cards: ['?', '?'], bet: 50 },
+    { name: 'Игрок 3', chips: 1200, cards: ['?', '?'], bet: 0 },
+    { name: 'Игрок 4', chips: 600, cards: ['?', '?'], bet: 50 },
+  ];
+
+  const communityCards = gameState?.communityCards || ['A♥', 'K♦', 'Q♣', '?', '?'];
+  const pot = gameState?.pot || 200;
+  const currentPlayerIndex = gameState?.currentPlayerIndex || 0;
 
   return (
-    <div className="min-h-screen p-4 flex flex-col items-center justify-center">
-      <div className="text-center mb-8">
-        <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-yellow-400 to-orange-500 bg-clip-text text-transparent">
-          🎰 Poker Club
-        </h1>
-        <p className="text-gray-400">Texas Hold'em • Mini App</p>
-      </div>
-
+    <div className="min-h-screen">
       {!gameStarted ? (
-        <button
-          onClick={() => setGameStarted(true)}
-          className="px-8 py-4 bg-gradient-to-r from-green-500 to-emerald-600 rounded-xl font-bold text-lg shadow-lg hover:scale-105 transition-all"
-        >
-          🃏 Start Game
-        </button>
-      ) : (
-        <PokerTable />
-      )}
+        <div className="h-screen flex flex-col items-center justify-center">
+          <div className="text-center mb-12 animate-fade-in">
+            <h1 className="text-6xl font-bold mb-4 bg-gradient-to-r from-yellow-400 via-orange-500 to-red-500 bg-clip-text text-transparent">
+              🎰 Poker Club
+            </h1>
+            <p className="text-gray-400 text-xl">Texas Hold'em • Telegram Mini App</p>
+          </div>
 
-      <div className="mt-8 text-center text-sm text-gray-500">
-        <p>Powered by Telegram Mini Apps</p>
-      </div>
+          <button
+            onClick={handleStartGame}
+            className="px-12 py-6 bg-gradient-to-r from-green-500 to-emerald-600 rounded-2xl font-bold text-2xl shadow-2xl hover:scale-110 transition-all duration-300 animate-bounce-in border-4 border-green-400"
+          >
+            🃏 Начать игру
+          </button>
+
+          {connected && (
+            <div className="mt-4 flex items-center gap-2 text-green-400 animate-fade-in">
+              <div className="w-3 h-3 bg-green-400 rounded-full animate-pulse"></div>
+              <span>Подключено к серверу</span>
+            </div>
+          )}
+
+          <div className="mt-12 text-center text-gray-500 animate-fade-in">
+            <p className="text-lg">Powered by Telegram Mini Apps</p>
+          </div>
+        </div>
+      ) : (
+        <PokerTable
+          players={players}
+          communityCards={communityCards}
+          pot={pot}
+          currentPlayerIndex={currentPlayerIndex}
+          onFold={handleFold}
+          onCall={handleCall}
+          onRaise={handleRaise}
+        />
+      )}
     </div>
-  )
+  );
 }
 
-export default App
+export default App;
