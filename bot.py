@@ -6,12 +6,11 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    filters
 )
+from telegram.constants import ParseMode
 from dotenv import load_dotenv
 from database import Database
+from poker_engine import PokerGame, Player as PokerPlayer
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -26,197 +25,304 @@ logger = logging.getLogger(__name__)
 # Инициализация базы данных
 db = Database()
 
-# Состояния для ConversationHandler
-ROOM_NAME, MAX_PLAYERS, BUY_IN, DATE_TIME, LOCATION = range(5)
+# Активные игры (в памяти)
+active_games = {}
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
-    await update.message.reply_text(
-        "🃏 Привет! Я бот для организации покерных комнат.\n\n"
-        "Доступные команды:\n"
-        "/create - Создать новую покерную комнату\n"
-        "/rooms - Показать активные комнаты\n"
-        "/help - Помощь"
-    )
+def format_chips(amount):
+    """Красивое форматирование фишек"""
+    if amount >= 1000000:
+        return f"{amount/1000000:.1f}M"
+    elif amount >= 1000:
+        return f"{amount/1000:.1f}K"
+    return str(amount)
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /help"""
-    await update.message.reply_text(
-        "📚 Инструкция по использованию бота:\n\n"
-        "1️⃣ /create - Создать новую покерную комнату\n"
-        "   Вы сможете указать название, количество игроков, бай-ин и др.\n\n"
-        "2️⃣ /rooms - Посмотреть все активные комнаты\n"
-        "   Здесь можно записаться в комнату или выйти из нее\n\n"
-        "3️⃣ Создатель комнаты может закрыть её через меню комнаты\n\n"
-        "По вопросам пишите @your_username"
-    )
+def get_progress_bar(current, max_val, length=10):
+    """Создает прогресс-бар"""
+    filled = int((current / max_val) * length) if max_val > 0 else 0
+    bar = "█" * filled + "░" * (length - filled)
+    return bar
 
 
-async def create_room_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начало создания комнаты"""
-    await update.message.reply_text(
-        "🎰 Создание новой покерной комнаты\n\n"
-        "Введите название комнаты:"
-    )
-    return ROOM_NAME
+def format_player_card(player_profile):
+    """Красивая карточка игрока"""
+    win_rate = (player_profile.games_won / player_profile.total_games * 100) if player_profile.total_games > 0 else 0
+
+    card = f"""
+╭─────────────────────╮
+│ 👤 <b>{player_profile.full_name}</b>
+│
+│ 💰 Фишки: <code>{format_chips(player_profile.chips)}</code>
+│ 🏆 Рейтинг: <code>{player_profile.rating}</code>
+│
+│ 📊 Статистика:
+│   Игр: {player_profile.total_games}
+│   Побед: {player_profile.games_won} ({win_rate:.1f}%)
+│   Выигрыш: {format_chips(player_profile.total_winnings)}
+╰─────────────────────╯
+"""
+    return card
 
 
-async def room_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение названия комнаты"""
-    context.user_data['room_name'] = update.message.text
-    await update.message.reply_text(
-        "Отлично! Теперь укажите максимальное количество игроков (или отправьте '-' для пропуска, по умолчанию 9):"
-    )
-    return MAX_PLAYERS
+def format_game_table(game: PokerGame, current_player_id=None):
+    """Красивое отображение игрового стола"""
+    stage_emoji = {
+        "waiting": "⏳",
+        "preflop": "🎴",
+        "flop": "🃏",
+        "turn": "🎯",
+        "river": "🌊",
+        "showdown": "🏆"
+    }
 
+    stage_name = {
+        "waiting": "Ожидание",
+        "preflop": "Префлоп",
+        "flop": "Флоп",
+        "turn": "Терн",
+        "river": "Ривер",
+        "showdown": "Вскрытие"
+    }
 
-async def max_players(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение максимального количества игроков"""
-    text = update.message.text
-    if text == '-':
-        context.user_data['max_players'] = 9
+    message = f"""
+╔══════════════════════════╗
+║   🎰 <b>TEXAS HOLD'EM</b> 🎰   ║
+╚══════════════════════════╝
+
+{stage_emoji.get(game.stage, '🎲')} <b>Стадия:</b> {stage_name.get(game.stage, game.stage)}
+💰 <b>Банк:</b> <code>{format_chips(game.pot)}</code>
+
+"""
+
+    # Общие карты
+    if game.community_cards:
+        cards_str = " ".join([str(card) for card in game.community_cards])
+        message += f"🎴 <b>Стол:</b> {cards_str}\n\n"
     else:
-        try:
-            count = int(text)
-            if count < 2 or count > 23:
-                await update.message.reply_text(
-                    "❌ Количество игроков должно быть от 2 до 23. Попробуйте снова:"
-                )
-                return MAX_PLAYERS
-            context.user_data['max_players'] = count
-        except ValueError:
-            await update.message.reply_text(
-                "❌ Пожалуйста, введите число или '-' для пропуска:"
-            )
-            return MAX_PLAYERS
+        message += f"🎴 <b>Стол:</b> [ - - - - - ]\n\n"
 
-    await update.message.reply_text(
-        "Укажите бай-ин (например: '100$' или 'Фрироллы') или '-' для пропуска:"
-    )
-    return BUY_IN
+    # Игроки
+    message += "👥 <b>Игроки:</b>\n"
+    for i, player in enumerate(game.players):
+        if player.folded:
+            status = "❌ Fold"
+        elif player.all_in:
+            status = "🔥 All-in"
+        else:
+            status = "✅"
 
+        is_current = "➤ " if (game.get_current_player() and player.user_id == game.get_current_player().user_id) else "  "
+        is_dealer = "🔴 " if i == game.dealer_position else ""
 
-async def buy_in(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение бай-ина"""
-    text = update.message.text
-    context.user_data['buy_in'] = "Не указан" if text == '-' else text
+        chips_bar = get_progress_bar(player.chips, 2000, 8)
 
-    await update.message.reply_text(
-        "Укажите дату и время игры (например: '15.02 в 19:00') или '-' для пропуска:"
-    )
-    return DATE_TIME
+        message += f"{is_current}{is_dealer}<b>{player.name}</b>\n"
+        message += f"   {chips_bar} <code>{format_chips(player.chips)}</code> {status}\n"
 
+        if player.current_bet > 0:
+            message += f"   💵 Ставка: <code>{format_chips(player.current_bet)}</code>\n"
+        message += "\n"
 
-async def date_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение даты и времени"""
-    text = update.message.text
-    context.user_data['date_time'] = None if text == '-' else text
-
-    await update.message.reply_text(
-        "Укажите место проведения или '-' для пропуска:"
-    )
-    return LOCATION
-
-
-async def location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение локации и создание комнаты"""
-    text = update.message.text
-    context.user_data['location'] = "Не указана" if text == '-' else text
-
-    # Создаем комнату в базе данных
-    user = update.effective_user
-    room = db.create_room(
-        chat_id=update.effective_chat.id,
-        creator_id=user.id,
-        creator_name=user.full_name,
-        room_name=context.user_data['room_name'],
-        max_players=context.user_data['max_players'],
-        buy_in=context.user_data['buy_in'],
-        date_time=context.user_data['date_time'],
-        location=context.user_data['location']
-    )
-
-    # Автоматически добавляем создателя в список игроков
-    db.add_player(room.id, user.id, user.username, user.full_name)
-
-    # Формируем сообщение о созданной комнате
-    message = format_room_message(room)
-
-    keyboard = [
-        [InlineKeyboardButton("➕ Записаться", callback_data=f"join_{room.id}")],
-        [InlineKeyboardButton("➖ Выйти", callback_data=f"leave_{room.id}")],
-        [InlineKeyboardButton("🗑 Закрыть комнату", callback_data=f"close_{room.id}")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(message, reply_markup=reply_markup)
-
-    # Очищаем данные пользователя
-    context.user_data.clear()
-
-    return ConversationHandler.END
-
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отмена создания комнаты"""
-    context.user_data.clear()
-    await update.message.reply_text("❌ Создание комнаты отменено.")
-    return ConversationHandler.END
-
-
-def format_room_message(room):
-    """Форматирование сообщения о комнате"""
-    players = room.players
-    players_count = len(players)
-
-    message = f"🎰 <b>{room.room_name}</b>\n\n"
-    message += f"👤 Организатор: {room.creator_name}\n"
-    message += f"👥 Игроков: {players_count}/{room.max_players}\n"
-    message += f"💰 Бай-ин: {room.buy_in}\n"
-
-    if room.date_time:
-        message += f"📅 Время: {room.date_time}\n"
-
-    if room.location != "Не указана":
-        message += f"📍 Место: {room.location}\n"
-
-    message += "\n<b>Список игроков:</b>\n"
-    for i, player in enumerate(players, 1):
-        username = f"@{player.username}" if player.username else player.full_name
-        message += f"{i}. {username}\n"
+    # Текущий ход
+    current = game.get_current_player()
+    if current:
+        message += f"⏱ <b>Ход игрока:</b> {current.name}\n"
+        message += f"💵 <b>Текущая ставка:</b> <code>{format_chips(game.current_bet)}</code>\n"
 
     return message
 
 
-async def show_rooms(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать все активные комнаты"""
-    rooms = db.get_active_rooms(update.effective_chat.id)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /start"""
+    user = update.effective_user
+    player = db.get_or_create_player(user.id, user.username, user.full_name)
 
-    if not rooms:
-        await update.message.reply_text(
-            "📭 Нет активных комнат.\n\n"
-            "Создайте новую комнату командой /create"
-        )
-        return
+    welcome_msg = f"""
+🎰 <b>Добро пожаловать в Poker Club!</b> 🎰
 
-    await update.message.reply_text(f"📋 Найдено активных комнат: {len(rooms)}\n")
+Привет, {user.first_name}! Готов сыграть в Texas Hold'em?
 
-    for room in rooms:
-        message = format_room_message(room)
+{format_player_card(player)}
 
+<b>🎮 Команды:</b>
+/play - Создать или присоединиться к игре
+/balance - Мой баланс и статистика
+/bonus - Получить ежедневный бонус
+/top - Таблица лидеров
+/help - Помощь
+
+<i>Удачи за столами! 🍀</i>
+"""
+
+    await update.message.reply_text(welcome_msg, parse_mode=ParseMode.HTML)
+
+
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать баланс и статистику"""
+    user = update.effective_user
+    player = db.get_or_create_player(user.id, user.username, user.full_name)
+
+    message = format_player_card(player)
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🎁 Получить бонус", callback_data="daily_bonus"),
+            InlineKeyboardButton("🎮 Играть", callback_data="create_game")
+        ],
+        [InlineKeyboardButton("🏆 Рейтинг", callback_data="leaderboard")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+
+
+async def daily_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ежедневный бонус"""
+    user = update.effective_user
+    bonus = db.get_daily_bonus(user.id)
+
+    if bonus:
+        player = db.get_or_create_player(user.id, user.username, user.full_name)
+        message = f"""
+🎁 <b>Ежедневный бонус получен!</b>
+
+Вы получили: <code>+{bonus}</code> фишек 💰
+
+Ваш баланс: <code>{format_chips(player.chips)}</code>
+
+<i>Возвращайтесь завтра за новым бонусом! ⏰</i>
+"""
+    else:
+        message = """
+⏰ <b>Бонус уже получен</b>
+
+Вы уже получили бонус сегодня!
+Возвращайтесь через 24 часа 🕐
+"""
+
+    await update.message.reply_text(message, parse_mode=ParseMode.HTML)
+
+
+async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Таблица лидеров"""
+    leaders = db.get_leaderboard(10)
+
+    message = """
+╔═══════════════════════════╗
+║   🏆 <b>ТАБЛИЦА ЛИДЕРОВ</b> 🏆   ║
+╚═══════════════════════════╝
+
+"""
+
+    medals = ["🥇", "🥈", "🥉"]
+
+    for i, player in enumerate(leaders, 1):
+        medal = medals[i-1] if i <= 3 else f"{i}."
+        win_rate = (player.games_won / player.total_games * 100) if player.total_games > 0 else 0
+
+        message += f"{medal} <b>{player.full_name}</b>\n"
+        message += f"   ⭐️ Рейтинг: <code>{player.rating}</code>\n"
+        message += f"   💰 Фишки: <code>{format_chips(player.chips)}</code>\n"
+        message += f"   🎯 Винрейт: <code>{win_rate:.1f}%</code> ({player.games_won}/{player.total_games})\n\n"
+
+    keyboard = [[InlineKeyboardButton("🔄 Обновить", callback_data="leaderboard")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+
+
+async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Создать или присоединиться к игре"""
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    player = db.get_or_create_player(user.id, user.username, user.full_name)
+
+    # Проверяем, есть ли активная игра в этом чате
+    if chat_id in active_games:
+        game = active_games[chat_id]
+        if game.stage == "waiting":
+            # Можно присоединиться
+            message = f"""
+🎰 <b>Активная игра найдена!</b>
+
+Игроков за столом: {len(game.players)}/{game.max_players}
+Блайнды: {game.small_blind}/{game.big_blind}
+
+💰 Ваш баланс: <code>{format_chips(player.chips)}</code>
+"""
+            keyboard = [
+                [InlineKeyboardButton(f"💰 Сесть за стол (100 фишек)", callback_data=f"join_game_{chat_id}_100")],
+                [InlineKeyboardButton(f"💵 Сесть за стол (500 фишек)", callback_data=f"join_game_{chat_id}_500")],
+                [InlineKeyboardButton(f"💸 Сесть за стол (1000 фишек)", callback_data=f"join_game_{chat_id}_1000")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+            ]
+        else:
+            # Игра уже идет
+            message = "⏳ Игра уже идет. Дождитесь окончания раунда."
+            keyboard = [[InlineKeyboardButton("👀 Посмотреть", callback_data=f"view_game_{chat_id}")]]
+    else:
+        # Создаем новую игру
+        message = f"""
+🎰 <b>Создание нового стола</b>
+
+Выберите параметры игры:
+
+💰 Ваш баланс: <code>{format_chips(player.chips)}</code>
+"""
         keyboard = [
-            [InlineKeyboardButton("➕ Записаться", callback_data=f"join_{room.id}")],
-            [InlineKeyboardButton("➖ Выйти", callback_data=f"leave_{room.id}")],
+            [InlineKeyboardButton("🎲 Быстрая игра (10/20)", callback_data="create_quick")],
+            [InlineKeyboardButton("💎 Стандарт (50/100)", callback_data="create_standard")],
+            [InlineKeyboardButton("👑 Хайроллер (100/200)", callback_data="create_high")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
         ]
 
-        # Только создатель может закрыть комнату
-        if update.effective_user.id == room.creator_id:
-            keyboard.append([InlineKeyboardButton("🗑 Закрыть комнату", callback_data=f"close_{room.id}")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(message, reply_markup=reply_markup, parse_mode='HTML')
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Помощь"""
+    help_text = """
+📚 <b>Как играть в Texas Hold'em?</b>
+
+<b>🎯 Цель игры:</b>
+Собрать лучшую комбинацию из 5 карт, используя свои 2 карты и 5 общих карт на столе.
+
+<b>🎴 Комбинации (от слабой к сильной):</b>
+1. Старшая карта
+2. Пара
+3. Две пары
+4. Тройка (Сет)
+5. Стрит
+6. Флеш
+7. Фулл хаус
+8. Каре
+9. Стрит флеш
+10. Роял флеш
+
+<b>💡 Действия в игре:</b>
+• <b>Check</b> - пропустить ход (если нет ставки)
+• <b>Call</b> - уравнять ставку
+• <b>Raise</b> - повысить ставку
+• <b>Fold</b> - сбросить карты
+• <b>All-in</b> - поставить все фишки
+
+<b>🎮 Команды бота:</b>
+/play - Начать игру
+/balance - Баланс и статистика
+/bonus - Ежедневный бонус
+/top - Таблица лидеров
+
+<b>💰 Фишки:</b>
+• Стартовые: 1000 фишек
+• Ежедневный бонус: 100 фишек
+• Играйте и выигрывайте больше!
+
+<i>Удачи за столами! 🍀</i>
+"""
+
+    await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -225,76 +331,209 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     data = query.data
-    action, room_id = data.split('_')
-    room_id = int(room_id)
-
     user = update.effective_user
-    room = db.get_room(room_id)
+    chat_id = update.effective_chat.id
 
-    if not room or not room.is_active:
-        await query.edit_message_text("❌ Комната не найдена или уже закрыта.")
-        return
+    # Ежедневный бонус
+    if data == "daily_bonus":
+        bonus = db.get_daily_bonus(user.id)
+        if bonus:
+            player = db.get_or_create_player(user.id, user.username, user.full_name)
+            message = f"""
+🎁 <b>Бонус получен!</b>
 
-    if action == "join":
-        # Проверяем, не заполнена ли комната
-        players_count = db.get_room_players_count(room_id)
-        if players_count >= room.max_players:
-            await query.answer("❌ Комната заполнена!", show_alert=True)
++{bonus} фишек 💰
+Баланс: <code>{format_chips(player.chips)}</code>
+"""
+        else:
+            message = "⏰ Бонус уже получен сегодня!"
+
+        await query.edit_message_text(message, parse_mode=ParseMode.HTML)
+
+    # Таблица лидеров
+    elif data == "leaderboard":
+        leaders = db.get_leaderboard(10)
+        message = """
+╔═══════════════════════════╗
+║   🏆 <b>ТАБЛИЦА ЛИДЕРОВ</b> 🏆   ║
+╚═══════════════════════════╝
+
+"""
+        medals = ["🥇", "🥈", "🥉"]
+        for i, player in enumerate(leaders, 1):
+            medal = medals[i-1] if i <= 3 else f"{i}."
+            win_rate = (player.games_won / player.total_games * 100) if player.total_games > 0 else 0
+            message += f"{medal} <b>{player.full_name}</b>\n"
+            message += f"   ⭐️ {player.rating} | 💰 {format_chips(player.chips)} | 🎯 {win_rate:.1f}%\n\n"
+
+        keyboard = [[InlineKeyboardButton("🔄 Обновить", callback_data="leaderboard")]]
+        await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+
+    # Создание игры
+    elif data.startswith("create_"):
+        game_type = data.split("_")[1]
+        blinds = {"quick": (10, 20), "standard": (50, 100), "high": (100, 200)}
+        sb, bb = blinds.get(game_type, (10, 20))
+
+        # Создаем игру
+        game = PokerGame(game_id=str(chat_id), small_blind=sb, big_blind=bb)
+        active_games[chat_id] = game
+
+        message = f"""
+✅ <b>Стол создан!</b>
+
+💰 Блайнды: {sb}/{bb}
+👥 Игроков: 0/{game.max_players}
+
+Выберите бай-ин:
+"""
+        keyboard = [
+            [InlineKeyboardButton(f"💰 {format_chips(bb*5)}", callback_data=f"join_game_{chat_id}_{bb*5}")],
+            [InlineKeyboardButton(f"💵 {format_chips(bb*10)}", callback_data=f"join_game_{chat_id}_{bb*10}")],
+            [InlineKeyboardButton(f"💸 {format_chips(bb*20)}", callback_data=f"join_game_{chat_id}_{bb*20}")],
+        ]
+        await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+
+    # Присоединение к игре
+    elif data.startswith("join_game_"):
+        parts = data.split("_")
+        game_chat_id = int(parts[2])
+        buy_in = int(parts[3])
+
+        if game_chat_id not in active_games:
+            await query.edit_message_text("❌ Игра не найдена")
             return
 
-        player = db.add_player(room_id, user.id, user.username, user.full_name)
-        if player:
-            # Обновляем сообщение
-            room = db.get_room(room_id)
-            message = format_room_message(room)
+        game = active_games[game_chat_id]
+        player = db.get_or_create_player(user.id, user.username, user.full_name)
 
-            keyboard = [
-                [InlineKeyboardButton("➕ Записаться", callback_data=f"join_{room.id}")],
-                [InlineKeyboardButton("➖ Выйти", callback_data=f"leave_{room.id}")],
-            ]
-
-            if user.id == room.creator_id:
-                keyboard.append([InlineKeyboardButton("🗑 Закрыть комнату", callback_data=f"close_{room.id}")])
-
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='HTML')
-            await query.answer("✅ Вы записаны в комнату!")
-        else:
-            await query.answer("ℹ️ Вы уже записаны в эту комнату", show_alert=True)
-
-    elif action == "leave":
-        success = db.remove_player(room_id, user.id)
-        if success:
-            # Обновляем сообщение
-            room = db.get_room(room_id)
-            message = format_room_message(room)
-
-            keyboard = [
-                [InlineKeyboardButton("➕ Записаться", callback_data=f"join_{room.id}")],
-                [InlineKeyboardButton("➖ Выйти", callback_data=f"leave_{room.id}")],
-            ]
-
-            if user.id == room.creator_id:
-                keyboard.append([InlineKeyboardButton("🗑 Закрыть комнату", callback_data=f"close_{room.id}")])
-
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='HTML')
-            await query.answer("✅ Вы вышли из комнаты")
-        else:
-            await query.answer("❌ Вы не записаны в эту комнату", show_alert=True)
-
-    elif action == "close":
-        # Проверяем, что закрывает создатель
-        if user.id != room.creator_id:
-            await query.answer("❌ Только создатель может закрыть комнату!", show_alert=True)
+        # Проверяем баланс
+        if player.chips < buy_in:
+            await query.answer(f"❌ Недостаточно фишек! Нужно {buy_in}, у вас {player.chips}", show_alert=True)
             return
 
-        db.close_room(room_id)
-        await query.edit_message_text(
-            f"🔒 Комната '{room.room_name}' закрыта.\n\n"
-            f"Участвовало игроков: {len(room.players)}"
-        )
-        await query.answer("✅ Комната закрыта")
+        # Добавляем в игру
+        if game.add_player(user.id, user.full_name, buy_in):
+            # Списываем фишки
+            db.update_player_chips(user.id, player.chips - buy_in)
+
+            await query.answer("✅ Вы сели за стол!", show_alert=True)
+
+            # Обновляем сообщение
+            message = format_game_table(game)
+            message += "\n⏳ <i>Ожидание игроков...</i>\n"
+
+            keyboard = []
+            if len(game.players) >= game.min_players:
+                keyboard.append([InlineKeyboardButton("🎮 Начать игру", callback_data=f"start_game_{game_chat_id}")])
+            keyboard.append([InlineKeyboardButton("➕ Пригласить друзей", switch_inline_query="Присоединяйся к покеру!")])
+
+            await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+        else:
+            await query.answer("❌ Не удалось присоединиться", show_alert=True)
+
+    # Начало игры
+    elif data.startswith("start_game_"):
+        game_chat_id = int(data.split("_")[2])
+
+        if game_chat_id not in active_games:
+            await query.edit_message_text("❌ Игра не найдена")
+            return
+
+        game = active_games[game_chat_id]
+
+        if game.start_game():
+            message = format_game_table(game)
+
+            current_player = game.get_current_player()
+            keyboard = []
+
+            if current_player and current_player.user_id == user.id:
+                # Кнопки действий для текущего игрока
+                keyboard = [
+                    [
+                        InlineKeyboardButton("✅ Check", callback_data=f"action_{game_chat_id}_check"),
+                        InlineKeyboardButton("📞 Call", callback_data=f"action_{game_chat_id}_call")
+                    ],
+                    [
+                        InlineKeyboardButton("⬆️ Raise", callback_data=f"action_{game_chat_id}_raise"),
+                        InlineKeyboardButton("❌ Fold", callback_data=f"action_{game_chat_id}_fold")
+                    ],
+                    [InlineKeyboardButton("🔥 All-in", callback_data=f"action_{game_chat_id}_all_in")]
+                ]
+
+            await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+        else:
+            await query.answer("❌ Недостаточно игроков для старта", show_alert=True)
+
+    # Игровые действия
+    elif data.startswith("action_"):
+        parts = data.split("_")
+        game_chat_id = int(parts[1])
+        action = parts[2]
+
+        if game_chat_id not in active_games:
+            await query.answer("❌ Игра не найдена", show_alert=True)
+            return
+
+        game = active_games[game_chat_id]
+        current_player = game.get_current_player()
+
+        if not current_player or current_player.user_id != user.id:
+            await query.answer("❌ Сейчас не ваш ход!", show_alert=True)
+            return
+
+        # Выполняем действие
+        if game.player_action(user.id, action):
+            message = format_game_table(game)
+
+            # Проверяем, закончилась ли игра
+            if game.stage == "showdown":
+                # Показываем результаты
+                winners, hands, best_cards = game._go_to_showdown()
+
+                message += "\n🏆 <b>РЕЗУЛЬТАТЫ:</b>\n\n"
+                for i, winner in enumerate(winners):
+                    message += f"👑 <b>{winner.name}</b>\n"
+                    message += f"   Комбинация: {hands[i].name_ru}\n"
+                    message += f"   Карты: {' '.join([str(c) for c in best_cards[i]])}\n"
+                    message += f"   Выигрыш: 💰 <code>{format_chips(game.pot // len(winners))}</code>\n\n"
+
+                # Обновляем статистику
+                for winner in winners:
+                    db.update_player_stats(winner.user_id, won=True, winnings=game.pot // len(winners))
+                    player_profile = db.get_or_create_player(winner.user_id, "", winner.name)
+                    db.add_chips(winner.user_id, game.pot // len(winners))
+
+                # Удаляем игру
+                del active_games[game_chat_id]
+
+                keyboard = [[InlineKeyboardButton("🔄 Новая игра", callback_data="create_game")]]
+                await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+            else:
+                # Продолжаем игру
+                next_player = game.get_current_player()
+                keyboard = []
+
+                if next_player and next_player.user_id == user.id:
+                    keyboard = [
+                        [
+                            InlineKeyboardButton("✅ Check", callback_data=f"action_{game_chat_id}_check"),
+                            InlineKeyboardButton("📞 Call", callback_data=f"action_{game_chat_id}_call")
+                        ],
+                        [
+                            InlineKeyboardButton("⬆️ Raise", callback_data=f"action_{game_chat_id}_raise"),
+                            InlineKeyboardButton("❌ Fold", callback_data=f"action_{game_chat_id}_fold")
+                        ],
+                        [InlineKeyboardButton("🔥 All-in", callback_data=f"action_{game_chat_id}_all_in")]
+                    ]
+
+                await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+        else:
+            await query.answer("❌ Невозможное действие", show_alert=True)
+
+    elif data == "cancel":
+        await query.edit_message_text("❌ Отменено")
 
 
 def main():
@@ -304,31 +543,18 @@ def main():
         logger.error("Не найден BOT_TOKEN в переменных окружения!")
         return
 
-    # Создаем приложение
     application = Application.builder().token(token).build()
-
-    # Обработчик создания комнаты
-    create_room_handler = ConversationHandler(
-        entry_points=[CommandHandler('create', create_room_start)],
-        states={
-            ROOM_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, room_name)],
-            MAX_PLAYERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, max_players)],
-            BUY_IN: [MessageHandler(filters.TEXT & ~filters.COMMAND, buy_in)],
-            DATE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, date_time)],
-            LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, location)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-    )
 
     # Регистрируем обработчики
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("play", play))
+    application.add_handler(CommandHandler("balance", balance))
+    application.add_handler(CommandHandler("bonus", daily_bonus))
+    application.add_handler(CommandHandler("top", leaderboard))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(create_room_handler)
-    application.add_handler(CommandHandler("rooms", show_rooms))
     application.add_handler(CallbackQueryHandler(button_callback))
 
-    # Запускаем бота
-    logger.info("Бот запущен!")
+    logger.info("🎰 Poker Bot запущен!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
