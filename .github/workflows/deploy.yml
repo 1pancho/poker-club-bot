@@ -117,25 +117,40 @@ jobs:
             # DEPLOY WEBSOCKET SERVER (Node.js)
             # ============================================
 
-            # Setup NVM for current session
-            export NVM_DIR="$HOME/.nvm"
-            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-            nvm use 20
+            # Setup NVM for current session (with fallback)
+            if [ -d "$HOME/.nvm" ]; then
+                export NVM_DIR="$HOME/.nvm"
+                [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+                nvm use 20 || echo "NVM use failed, continuing..."
+            else
+                echo "NVM not found, using system Node.js"
+            fi
 
             # Install server dependencies
             cd server
-            npm install --production
 
-            # Stop existing PM2 process if running
-            pm2 stop poker-ws || true
-            pm2 delete poker-ws || true
+            # Check if node is available
+            if command -v node &> /dev/null; then
+                npm install --production
 
-            # Start WebSocket server with PM2
-            PORT=3001 pm2 start index.js --name poker-ws
-            pm2 save
+                # Check if PM2 is available
+                if command -v pm2 &> /dev/null; then
+                    # Stop existing PM2 process if running
+                    pm2 stop poker-ws || true
+                    pm2 delete poker-ws || true
 
-            # Setup PM2 startup
-            pm2 startup systemd -u root --hp /root || true
+                    # Start WebSocket server with PM2
+                    PORT=3001 pm2 start index.js --name poker-ws
+                    pm2 save
+
+                    # Setup PM2 startup
+                    pm2 startup systemd -u root --hp /root || true
+                else
+                    echo "PM2 not installed, skipping WebSocket server deployment"
+                fi
+            else
+                echo "Node.js not found, skipping WebSocket server deployment"
+            fi
 
             cd ..
 
